@@ -1,0 +1,112 @@
+---
+- name: Ubuntu Temel Sistem Guvenlik (Hardening) Ayarlari
+  hosts: ubuntu_hosts # Ansible Inventory dosyanızdaki grubu buraya yazın (Örn: ubuntu_hosts)
+  become: yes # Komutları root yetkisiyle (sudo) çalıştır
+
+  vars:
+    # 900 saniye = 15 dakika, kullanıcılar için oturum zaman aşımı
+    session_timeout_seconds: 900
+    # Kullanıcı şifrelerinin karmaşıklığını ve son kullanma tarihlerini belirleyen ayarlar
+    max_password_age: 90 # Şifre maksimum 90 gün geçerli
+    min_password_age: 7  # Şifre değiştirildikten sonra en az 7 gün beklemeli
+
+  tasks:
+    - name: 1. Sistem Paketlerini Guncelle (Update)
+      apt:
+        update_cache: yes
+        upgrade: dist
+        autoclean: yes
+        autoremove: yes
+      tags:
+        - packages
+
+    - name: 2. Core Dump'lari Devre Disi Birak
+      # Uygulama çökmeleri sırasında hassas veri sızıntısını önler
+      copy:
+        content: "* hard core 0\n"
+        dest: /etc/security/limits.d/core_security.conf
+        owner: root
+        group: root
+        mode: '0644'
+      tags:
+        - limits
+
+    - name: 3. Kullanici Oturum Zaman Asimi Ayari (TMEOUT benzeri)
+      # Kullanıcı etkileşimi olmazsa oturumu sonlandırır
+      block:
+        - name: Timeout.sh dosyasi olustur
+          copy:
+            content: |
+              # /etc/profile.d/timeout.sh
+              # Kullanici oturum zaman asimi ayari
+              TMOUT={{ session_timeout_seconds }}
+              readonly TMOUT
+              export TMOUT
+            dest: /etc/profile.d/timeout.sh
+            owner: root
+            group: root
+            mode: '0644'
+          tags:
+            - timeout
+
+    - name: 4. Parola Politikalarini Guclendir (login.defs benzeri)
+      # /etc/login.defs ayarlarını uygulamak için useradd varsayılanlarını ayarla
+      lineinfile:
+        path: /etc/login.defs
+        regexp: '^{{ item.regex }}'
+        line: '{{ item.line }}'
+        state: present
+      loop:
+        - { regex: '^PASS_MAX_DAYS', line: 'PASS_MAX_DAYS\t{{ max_password_age }}' }
+        - { regex: '^PASS_MIN_DAYS', line: 'PASS_MIN_DAYS\t{{ min_password_age }}' }
+        - { regex: '^PASS_WARN_AGE', line: 'PASS_WARN_AGE\t7' }
+      tags:
+        - password_policy
+
+    - name: 5. Parola Karmasiklik Gereksinimi (pam_cracklib/pam_pwquality benzeri)
+      # Ubuntu'da /etc/pam.d/common-password dosyasında pam_pwquality modülünü kullanır
+      lineinfile:
+        path: /etc/pam.d/common-password
+        regexp: '^(password\s+requisite\s+pam_pwquality.so)'
+        line: '\1 retry=3 minlen=12 dcredit=-1 ucredit=-1 ocredit=-1 lcredit=-1'
+        backrefs: yes
+      tags:
+        - pam
+
+    - name: 6. Sysctl Ayarlari (net.ipv4 Hardening)
+      # Temel IP/Ağ güvenliği ayarları
+      sysctl:
+        name: '{{ item.key }}'
+        value: '{{ item.value }}'
+        state: present
+        reload: yes
+      loop:
+        # IPv4 Yönlendirmeyi Kapat
+        - { key: 'net.ipv4.ip_forward', value: '0' }
+        # Tüm ağ arayüzlerinde kaynak yönlendirmeyi (source routing) engelle
+        - { key: 'net.ipv4.conf.all.accept_source_route', value: '0' }
+        # Yönlendirmeleri (Redirects) Engelle
+        - { key: 'net.ipv4.conf.all.accept_redirects', value: '0' }
+        - { key: 'net.ipv4.conf.default.accept_redirects', value: '0' }
+        # Sahte (Spoofed) paketleri kaydet ve reddet
+        - { key: 'net.ipv4.conf.all.rp_filter', value: '1' }
+      tags:
+        - sysctl
+
+    - name: 7. ctrl-alt-del Islemini Devre Disi Birak (systemd)
+      # Makineye fiziksel erişimi olan kullanıcıların sistemi yeniden başlatmasını engeller
+      file:
+        path: /etc/systemd/system/ctrl-alt-del.target
+        state: absent # Varsayılan symlink'i siler
+      tags:
+        - systemd
+
+    - name: 8. USB Otomatik Yüklemeyi Devre Disi Birak (modprobe benzeri)
+      # Güvenlik için, Pod'unuzdaki gibi modprobe komutlarını devre dışı bırakır.
+      lineinfile:
+        path: /etc/modprobe.d/usb_blacklist.conf
+        line: 'install usb-storage /bin/true'
+        create: yes
+        state: present
+      tags:
+        - modprobe
