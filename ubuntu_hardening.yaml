@@ -11,14 +11,6 @@
     min_password_age: 7  # Şifre değiştirildikten sonra en az 7 gün beklemeli
 
   tasks:
-    - name: 1. Sistem Paketlerini Guncelle (Update)
-      apt:
-        update_cache: yes
-        upgrade: dist
-        autoclean: yes
-        autoremove: yes
-      tags:
-        - packages
 
     - name: 2. Core Dump'lari Devre Disi Birak
       # Uygulama çökmeleri sırasında hassas veri sızıntısını önler
