@@ -1,7 +1,7 @@
 ---
 - name: Ubuntu Temel Sistem Guvenlik (Hardening) Ayarlari
-  hosts: ubuntu_hosts # Ansible Inventory dosyanızdaki grubu buraya yazın (Örn: ubuntu_hosts)
-  become: yes # Komutları root yetkisiyle (sudo) çalıştır
+  hosts: ubuntu_hosts 
+  become: yes 
 
   vars:
     # 900 saniye = 15 dakika, kullanıcılar için oturum zaman aşımı
