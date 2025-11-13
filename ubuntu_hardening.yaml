@@ -1,7 +1,7 @@
 ---
-- name: Ubuntu Temel Sistem Guvenlik (Hardening) Ayarlari
-  hosts: ubuntu_hosts 
-  become: yes 
+- name: SUSE Hardening Ayarlari
+  hosts: suse_hosts 
+  become: yes
 
   vars:
     # 900 saniye = 15 dakika, kullanıcılar için oturum zaman aşımı
@@ -9,10 +9,26 @@
     # Kullanıcı şifrelerinin karmaşıklığını ve son kullanma tarihlerini belirleyen ayarlar
     max_password_age: 90 # Şifre maksimum 90 gün geçerli
     min_password_age: 7  # Şifre değiştirildikten sonra en az 7 gün beklemeli
+    max_password_attempts: 5 # Hatalı şifre denemesi limiti
+    password_lockout_time: 900 # Şifre kilitlenme süresi (saniye)
 
   tasks:
+    # --- 1. Kullanılmayan Servislerin Kaldırılması ve Güvenlik Ayarları ---
+    - name: 1.1. Kullanilmayan veya Guvenlik Riski Tasiyan Servisleri Kaldir (Zypper)
+      # Lütfen kaldırılacak paketleri ortamınıza göre ayarlayın (örn. nis, talk, rsh, tftp, ldap, cups vb.)
+      community.general.zypper:
+        name: 
+          - telnetd
+          - rsh-server
+          - nis
+        state: absent
+      tags:
+        - services
+        - remove
 
-    - name: 2. Core Dump'lari Devre Disi Birak
+    # --- 2. Çekirdek (Kernel/Sysctl) Güvenlik Ayarları ---
+
+    - name: 2.1. Core Dump'lari Devre Disi Birak (Mevcut Adım)
       # Uygulama çökmeleri sırasında hassas veri sızıntısını önler
       copy:
         content: "* hard core 0\n"
@@ -22,8 +38,52 @@
         mode: '0644'
       tags:
         - limits
+        - core_dump
 
-    - name: 3. Kullanici Oturum Zaman Asimi Ayari (TMEOUT benzeri)
+    - name: 2.2. Sysctl Ayarlari (net.ipv4 Hardening - Mevcut Adım ve Eksik Olanlar Eklendi)
+      # Temel IP/Ağ güvenliği ayarları ve görseldeki diğer sysctl ayarları
+      sysctl:
+        name: '{{ item.key }}'
+        value: '{{ item.value }}'
+        state: present
+        reload: yes
+      loop:
+        # IPv4 Yönlendirmeyi Kapat
+        - { key: 'net.ipv4.ip_forward', value: '0' }
+        # Tüm ağ arayüzlerinde kaynak yönlendirmeyi (source routing) engelle
+        - { key: 'net.ipv4.conf.all.accept_source_route', value: '0' }
+        - { key: 'net.ipv4.conf.default.accept_source_route', value: '0' }
+        # Yönlendirmeleri (Redirects) Engelle
+        - { key: 'net.ipv4.conf.all.accept_redirects', value: '0' }
+        - { key: 'net.ipv4.conf.default.accept_redirects', value: '0' }
+        # Sahte (Spoofed) paketleri kaydet ve reddet
+        - { key: 'net.ipv4.conf.all.rp_filter', value: '1' }
+        # Syn flood saldırılarına karşı koruma
+        - { key: 'net.ipv4.tcp_syncookies', value: '1' }
+        # ICMP yayın isteklerini yoksay
+        - { key: 'net.ipv4.icmp_echo_ignore_broadcasts', value: '1' }
+        # Kötü niyetli hata mesajlarını logla ve yoksay
+        - { key: 'net.ipv4.icmp_ignore_bogus_error_responses', value: '1' }
+        # Sızıntılara karşı koruma (Martian Loglama)
+        - { key: 'net.ipv4.conf.all.log_martians', value: '1' }
+      tags:
+        - sysctl
+        - network
+
+    - name: 2.3. USB Otomatik Yüklemeyi Devre Disi Birak (Mevcut Adım)
+      # Güvenlik için, modprobe komutlarını devre dışı bırakır.
+      lineinfile:
+        path: /etc/modprobe.d/usb_blacklist.conf
+        line: 'install usb-storage /bin/true'
+        create: yes
+        state: present
+      tags:
+        - modprobe
+        - usb
+
+    # --- 3. Kullanıcı ve Parola Politikaları ---
+
+    - name: 3.1. Kullanici Oturum Zaman Asimi Ayari (Mevcut Adım)
       # Kullanıcı etkileşimi olmazsa oturumu sonlandırır
       block:
         - name: Timeout.sh dosyasi olustur
@@ -41,8 +101,8 @@
           tags:
             - timeout
 
-    - name: 4. Parola Politikalarini Guclendir (login.defs benzeri)
-      # /etc/login.defs ayarlarını uygulamak için useradd varsayılanlarını ayarla
+    - name: 3.2. Parola Politikalarini Guclendir (/etc/login.defs - Mevcut Adım)
+      # Parola geçerlilik süresi ve bekleme günleri ayarları
       lineinfile:
         path: /etc/login.defs
         regexp: '^{{ item.regex }}'
@@ -54,51 +114,94 @@
         - { regex: '^PASS_WARN_AGE', line: 'PASS_WARN_AGE\t7' }
       tags:
         - password_policy
+        - login_defs
 
-    - name: 5. Parola Karmasiklik Gereksinimi (pam_cracklib/pam_pwquality benzeri)
-      # Ubuntu'da /etc/pam.d/common-password dosyasında pam_pwquality modülünü kullanır
+    - name: 3.3. Parola Karmasiklik Gereksinimi (pam_pwquality/pam_cracklib)
       lineinfile:
-        path: /etc/pam.d/common-password
-        regexp: '^(password\s+requisite\s+pam_pwquality.so)'
+        path: /etc/pam.d/common-password-pc
+        regexp: '^(password\s+(required|requisite)\s+pam_(pwquality|cracklib).so)'
+        # minlen=12, dcredit=-1 (en az 1 rakam), ucredit=-1 (en az 1 büyük harf), ocredit=-1 (en az 1 özel karakter), lcredit=-1 (en az 1 küçük harf)
         line: '\1 retry=3 minlen=12 dcredit=-1 ucredit=-1 ocredit=-1 lcredit=-1'
         backrefs: yes
       tags:
         - pam
+        - password_complexity
 
-    - name: 6. Sysctl Ayarlari (net.ipv4 Hardening)
-      # Temel IP/Ağ güvenliği ayarları
-      sysctl:
-        name: '{{ item.key }}'
-        value: '{{ item.value }}'
-        state: present
-        reload: yes
-      loop:
-        # IPv4 Yönlendirmeyi Kapat
-        - { key: 'net.ipv4.ip_forward', value: '0' }
-        # Tüm ağ arayüzlerinde kaynak yönlendirmeyi (source routing) engelle
-        - { key: 'net.ipv4.conf.all.accept_source_route', value: '0' }
-        # Yönlendirmeleri (Redirects) Engelle
-        - { key: 'net.ipv4.conf.all.accept_redirects', value: '0' }
-        - { key: 'net.ipv4.conf.default.accept_redirects', value: '0' }
-        # Sahte (Spoofed) paketleri kaydet ve reddet
-        - { key: 'net.ipv4.conf.all.rp_filter', value: '1' }
+    - name: 3.4. Basarisiz Giris Denemesi Limiti ve Kilitlenme Ayari (pam_faillock)
+      # /etc/pam.d/common-auth dosyasında pam_faillock modülünü ekleyerek hatalı deneme limitini ayarla
+      blockinfile:
+        path: /etc/pam.d/common-auth
+        block: |
+          auth    required    pam_faillock.so preauth silent audit deny={{ max_password_attempts }} unlock_time={{ password_lockout_time }}
+          auth    [default=die]    pam_faillock.so authfail audit deny={{ max_password_attempts }} unlock_time={{ password_lockout_time }}
+          auth    sufficient    pam_faillock.so authsucc audit
+        marker: "# {mark} ANSIBLE MANAGED BLOCK - PAM FAILLOCK"
       tags:
-        - sysctl
+        - pam
+        - lockout
 
-    - name: 7. ctrl-alt-del Islemini Devre Disi Birak (systemd)
+    # --- 4. Dosya Sistemi İzinleri ve Kontrolleri ---
+
+    - name: 4.1. Kullanici Ana Dizin ve Shell Dosyalarinin Izinlerini Ayarla
+      file:
+        path: '{{ item }}'
+        mode: '0600'
+        owner: root
+        group: root
+      loop:
+        - /root/.bashrc
+        - /root/.profile
+        - /root/.bash_history
+        - /root/.bash_logout
+      tags:
+        - file_permissions
+
+    - name: 4.2. Hassas Sistem Dosyalarinin Izinlerini Ayarla
+      # /etc/passwd, /etc/shadow gibi hassas dosyaların izinlerini kontrol et
+      file:
+        path: '{{ item.path }}'
+        mode: '{{ item.mode }}'
+      loop:
+        - { path: /etc/passwd, mode: '0644' }
+        - { path: /etc/shadow, mode: '0000' } # Sadece root erişimi
+        - { path: /etc/group, mode: '0644' }
+        - { path: /etc/gshadow, mode: '0000' }
+      tags:
+        - file_permissions
+        - sensitive_files
+
+    # --- 5. Diğer Güvenlik Ayarları ---
+
+    - name: 5.1. ctrl-alt-del Islemini Devre Disi Birak (Mevcut Adım - systemd)
       # Makineye fiziksel erişimi olan kullanıcıların sistemi yeniden başlatmasını engeller
       file:
         path: /etc/systemd/system/ctrl-alt-del.target
         state: absent # Varsayılan symlink'i siler
       tags:
         - systemd
+        - ctrl_alt_del
 
-    - name: 8. USB Otomatik Yüklemeyi Devre Disi Birak (modprobe benzeri)
-      # Güvenlik için, Pod'unuzdaki gibi modprobe komutlarını devre dışı bırakır.
-      lineinfile:
-        path: /etc/modprobe.d/usb_blacklist.conf
-        line: 'install usb-storage /bin/true'
-        create: yes
-        state: present
+    - name: 5.2. /etc/issue ve /etc/issue.net Dosyalarini Guvenlik Bilgileriyle Guncelle
+      # Sistem bilgilerini ifşa etmeyen bir banner ekle
+      copy:
+        content: |
+          Authorized uses only. All activity is logged and monitored. Unauthorized access is prohibited.
+        dest: '{{ item }}'
+        owner: root
+        group: root
+        mode: '0644'
+      loop:
+        - /etc/issue
+        - /etc/issue.net
       tags:
-        - modprobe
+        - banner
+
+    - name: 5.3. AppArmor'u Etkinlestir ve Profilleri Zorunlu Moda Al (SUSE)
+      # SUSE'de AppArmor, Mandatory Access Control (MAC) mekanizmasıdır.
+      command: 'aa-enforce /etc/apparmor.d/*'
+      args:
+        warn: no
+      ignore_errors: yes
+      tags:
+        - mac
+        - apparmor
